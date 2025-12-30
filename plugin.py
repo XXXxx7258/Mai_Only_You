@@ -5,210 +5,32 @@ Mai_Only_You plugin (QQ private proactive chat).
 from __future__ import annotations
 
 import asyncio
-import copy
 import time
-import json
-import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type
 
-from src.chat.replyer.private_generator import PrivateReplyer
-from src.chat.utils.chat_message_builder import build_readable_messages
-from src.chat.utils.utils import is_bot_self
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.config.config import global_config, model_config
-from src.manager.async_task_manager import AsyncTask, async_task_manager
-from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
-from src.person_info.person_info import Person
-from src.plugin_system import (
-    BaseCommand,
-    BaseEventHandler,
-    BasePlugin,
-    ConfigField,
-    CustomEventHandlerResult,
-    EventType,
-    MaiMessages,
-    register_plugin,
-    get_logger,
+from src.plugin_system import BasePlugin, ConfigField, get_logger, register_plugin
+from src.plugin_system.apis import chat_api, llm_api, message_api, send_api
+
+__path__ = [str(Path(__file__).parent)]
+
+from .components import (
+    MaiOnlyYouTestCommand,
+    PrivateChatSchedulerEventHandler,
+    PrivateChatSilenceEventHandler,
+    PrivateChatStopEventHandler,
 )
-from src.plugin_system.apis import chat_api, message_api, send_api, llm_api
+from .prompt import MaiOnlyYouPromptMixin
+from .state import MaiOnlyYouStateMixin
 
 logger = get_logger("mai_only_you")
 
-
-class PrivateChatSchedulerTask(AsyncTask):
-    """定时扫描私聊静默状态"""
-
-    def __init__(self, plugin_instance: "MaiOnlyYouPlugin"):
-        super().__init__(
-            task_name="mai_only_you_scheduler",
-            wait_before_start=60,
-            run_interval=60,
-        )
-        self.plugin = plugin_instance
-
-    async def run(self):
-        try:
-            await self.plugin._scan_private_chats()
-        except Exception as exc:
-            logger.error(f"私聊定时扫描失败: {exc}")
-
-
-class PrivateChatSchedulerEventHandler(BaseEventHandler):
-    """启动定时扫描任务"""
-
-    event_type = EventType.ON_START
-    handler_name = "mai_only_you_scheduler"
-    handler_description = "启动私聊主动聊天调度"
-    weight = 50
-    intercept_message = False
-
-    def __init__(self):
-        super().__init__()
-        self.plugin_instance: Optional["MaiOnlyYouPlugin"] = None
-
-    async def execute(
-        self, message: MaiMessages | None
-    ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[MaiMessages]]:
-        try:
-            from src.plugin_system.core.plugin_manager import plugin_manager
-
-            self.plugin_instance = plugin_manager.get_plugin_instance("mai_only_you")
-            if not self.plugin_instance:
-                logger.error("无法获取 Mai_Only_You 插件实例")
-                return False, True, None, None, None
-
-            if not self.get_config("plugin.enabled", False):
-                logger.info("Mai_Only_You 未启用，跳过调度任务")
-                return True, True, None, None, None
-
-            task = PrivateChatSchedulerTask(self.plugin_instance)
-            await async_task_manager.add_task(task)
-
-            logger.info("Mai_Only_You 私聊调度任务已启动")
-            return True, True, None, None, None
-
-        except Exception as exc:
-            logger.error(f"启动私聊调度任务失败: {exc}")
-            return False, True, None, None, None
-
-
-class PrivateChatSilenceEventHandler(BaseEventHandler):
-    """私聊消息更新处理器"""
-
-    event_type = EventType.ON_MESSAGE
-    handler_name = "mai_only_you_silence"
-    handler_description = "更新私聊最后互动时间"
-    weight = 10
-    intercept_message = False
-
-    def __init__(self):
-        super().__init__()
-        self.plugin_instance: Optional["MaiOnlyYouPlugin"] = None
-
-    async def execute(
-        self, message: MaiMessages | None
-    ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[MaiMessages]]:
-        try:
-            if not message or not message.is_private_message:
-                return True, True, None, None, None
-
-            platform = message.message_base_info.get("platform")
-            if platform != "qq":
-                return True, True, None, None, None
-
-            user_id = str(message.message_base_info.get("user_id") or "")
-            if not user_id:
-                return True, True, None, None, None
-
-            if is_bot_self(platform, user_id):
-                return True, True, None, None, None
-
-            from src.plugin_system.core.plugin_manager import plugin_manager
-
-            self.plugin_instance = plugin_manager.get_plugin_instance("mai_only_you")
-            if not self.plugin_instance:
-                return True, True, None, None, None
-
-            if not self.get_config("plugin.enabled", False):
-                return True, True, None, None, None
-
-            if not self.plugin_instance._is_user_allowed(user_id):
-                return True, True, None, None, None
-
-            stream_id = message.stream_id
-            if not stream_id:
-                return True, True, None, None, None
-
-            self.plugin_instance._update_last_user_message(stream_id, time.time())
-            return True, True, None, None, None
-
-        except Exception as exc:
-            logger.error(f"私聊消息处理失败: {exc}")
-            return True, True, None, None, None
-
-
-class MaiOnlyYouTestCommand(BaseCommand):
-    """手动触发私聊主动聊天"""
-
-    command_name = "mai_only_you_test"
-    command_description = "手动触发私聊主动聊天"
-    command_pattern = r"^/mai_only_you_test(?:\s+(?P<user_id>\d+))?$"
-
-    async def execute(self) -> Tuple[bool, Optional[str], int]:
-        try:
-            from src.plugin_system.core.plugin_manager import plugin_manager
-
-            plugin_instance = plugin_manager.get_plugin_instance("mai_only_you")
-            if not plugin_instance:
-                await self.send_text("❌ 无法获取 Mai_Only_You 插件实例")
-                return False, "插件实例获取失败", True
-
-            if not self.get_config("plugin.enabled", False):
-                await self.send_text("❌ 插件未启用")
-                return False, "插件未启用", True
-
-            user_id = (self.matched_groups.get("user_id") or "").strip()
-            stream_id = None
-            target_user_id = ""
-            if user_id:
-                stream = chat_api.get_stream_by_user_id(user_id)
-                if not stream:
-                    await self.send_text("❌ 未找到指定用户的私聊")
-                    return False, "未找到私聊", True
-                if stream.platform != "qq":
-                    await self.send_text("❌ 仅支持 QQ 私聊")
-                    return False, "非 QQ 私聊", True
-                stream_id = stream.stream_id
-                target_user_id = str(stream.user_info.user_id or user_id)
-            else:
-                chat_stream = self.message.chat_stream
-                if not chat_stream or chat_stream.group_info:
-                    await self.send_text("❌ 请在私聊中使用或指定 user_id")
-                    return False, "非私聊", True
-                if chat_stream.platform != "qq":
-                    await self.send_text("❌ 仅支持 QQ 私聊")
-                    return False, "非 QQ 私聊", True
-                stream_id = chat_stream.stream_id
-                target_user_id = str(chat_stream.user_info.user_id or "")
-
-            if target_user_id and not plugin_instance._is_user_allowed(target_user_id):
-                await self.send_text("❌ 目标用户被名单过滤")
-                return False, "用户被过滤", True
-
-            await plugin_instance._handle_silence_trigger(stream_id, target_user_id, reason="调试命令")
-            return True, "调试触发完成", True
-
-        except Exception as exc:
-            logger.error(f"调试触发失败: {exc}")
-            await self.send_text("❌ 调试触发失败")
-            return False, "调试触发失败", True
-
-
 @register_plugin
-class MaiOnlyYouPlugin(BasePlugin):
+class MaiOnlyYouPlugin(MaiOnlyYouStateMixin, MaiOnlyYouPromptMixin, BasePlugin):
     """Mai_Only_You plugin."""
 
     plugin_name: str = "mai_only_you"
@@ -295,7 +117,7 @@ class MaiOnlyYouPlugin(BasePlugin):
                 type=int,
                 default=30,
                 description="状态保留天数（按时间清理）",
-                example="30",
+                example=30,
             ),
         },
     }
@@ -318,6 +140,7 @@ class MaiOnlyYouPlugin(BasePlugin):
         return [
             (PrivateChatSchedulerEventHandler.get_handler_info(), PrivateChatSchedulerEventHandler),
             (PrivateChatSilenceEventHandler.get_handler_info(), PrivateChatSilenceEventHandler),
+            (PrivateChatStopEventHandler.get_handler_info(), PrivateChatStopEventHandler),
             (MaiOnlyYouTestCommand.get_command_info(), MaiOnlyYouTestCommand),
         ]
 
@@ -331,157 +154,6 @@ class MaiOnlyYouPlugin(BasePlugin):
         if mode_value in {"allowlist", "whitelist"}:
             return user_id in user_set
         return user_id not in user_set
-
-    def _get_user_display_name(self, chat_stream, user_id: str) -> str:
-        try:
-            person = Person(platform=chat_stream.platform, user_id=user_id)
-            if getattr(person, "is_known", False) and person.person_name:
-                return str(person.person_name)
-        except Exception as exc:
-            logger.warning(f"获取数据库用户名称失败: {exc}")
-
-        user_info = getattr(chat_stream, "user_info", None)
-        nickname = getattr(user_info, "user_nickname", None) if user_info else None
-        if nickname:
-            return str(nickname)
-        return user_id
-
-    def _render_question_template(self, template: str, user_name: str, user_id: str) -> str:
-        values = {"user_name": user_name, "user_id": user_id}
-        try:
-            return template.format_map(values)
-        except KeyError as exc:
-            logger.warning(f"记忆模板占位符缺失: {exc}")
-        except Exception as exc:
-            logger.warning(f"记忆模板渲染失败: {exc}")
-        return template
-
-    async def _build_proactive_prompt(
-        self,
-        chat_stream,
-        last_user_msg: DatabaseMessages,
-        reason: str,
-        user_id: str,
-        stream_id: str,
-        context_limit: Optional[int],
-    ) -> Tuple[str, List[int]]:
-        replyer = PrivateReplyer(chat_stream, request_type="mai_only_you")
-        user_name = self._get_user_display_name(chat_stream, user_id)
-
-        target = (last_user_msg.processed_plain_text or "").strip()
-        if target:
-            target = replyer._replace_picids_with_descriptions(target)
-        else:
-            target = "（无内容）"
-
-        context_size = global_config.chat.max_context_size
-        if context_limit is not None:
-            try:
-                context_size = int(context_limit)
-            except (TypeError, ValueError):
-                context_size = global_config.chat.max_context_size
-        if context_size <= 0:
-            context_size = global_config.chat.max_context_size
-
-        now_ts = time.time()
-        message_list = message_api.get_messages_before_time_in_chat(
-            chat_id=stream_id,
-            timestamp=now_ts,
-            limit=context_size,
-            filter_intercept_message_level=1,
-        )
-        dialogue_prompt = build_readable_messages(
-            message_list,
-            replace_bot_name=True,
-            timestamp_mode="relative",
-            read_mark=0.0,
-            show_actions=True,
-            long_time_notice=True,
-        )
-
-        short_limit = max(1, int(context_size * 0.33))
-        message_list_short = message_api.get_messages_before_time_in_chat(
-            chat_id=stream_id,
-            timestamp=now_ts,
-            limit=short_limit,
-            filter_intercept_message_level=1,
-        )
-        dialogue_prompt_short = build_readable_messages(
-            message_list_short,
-            replace_bot_name=True,
-            timestamp_mode="relative",
-            read_mark=0.0,
-            show_actions=True,
-        )
-
-        memory_prompt = ""
-        if self.get_config("memory.enable_memory", True):
-            template = str(self.get_config("memory.question_template", "") or "").strip()
-            memory_question = None
-            if template:
-                rendered = self._render_question_template(template, user_name, user_id).strip()
-                if rendered:
-                    memory_question = rendered
-            memory_prompt = await build_memory_retrieval_prompt(
-                dialogue_prompt_short,
-                sender=user_name,
-                target=target,
-                chat_stream=chat_stream,
-                think_level=1,
-                question=memory_question,
-            )
-
-        expression_habits, selected_expressions = await replyer.build_expression_habits(
-            dialogue_prompt_short, target, reply_reason=reason
-        )
-        personality_prompt = await replyer.build_personality_prompt()
-        keywords_reaction_prompt = await replyer.build_keywords_reaction_prompt(target)
-
-        reply_style = global_config.personality.reply_style
-        multi_styles = getattr(global_config.personality, "multiple_reply_style", None) or []
-        multi_prob = getattr(global_config.personality, "multiple_probability", 0.0) or 0.0
-        if multi_styles and multi_prob > 0 and random.random() < multi_prob:
-            try:
-                reply_style = random.choice(list(multi_styles))
-            except Exception:
-                reply_style = global_config.personality.reply_style
-
-        chat_prompt_content = replyer.get_chat_prompt_for_chat(stream_id)
-        chat_prompt_block = f"{chat_prompt_content}\n" if chat_prompt_content else ""
-
-        last_user_ts = float(last_user_msg.time or 0.0)
-        last_user_text = (
-            datetime.fromtimestamp(last_user_ts).strftime("%Y-%m-%d %H:%M:%S") if last_user_ts > 0 else "未知"
-        )
-        gap_minutes = int((now_ts - last_user_ts) / 60) if last_user_ts > 0 else None
-        gap_text = f"{gap_minutes} 分钟" if gap_minutes is not None else "未知"
-
-        moderation_prompt = (
-            "请不要输出违法违规内容，不要输出色情、暴力、政治相关内容，如有敏感内容，请规避。"
-            "不要输出多余内容(包括前后缀、冒号、引号、括号、表情包、at 或 @ 等)。"
-        )
-
-        prompt_parts = [
-            memory_prompt,
-            expression_habits,
-            f"当前时间：{datetime.fromtimestamp(now_ts).strftime('%Y-%m-%d %H:%M:%S')}",
-            f"对方上次私聊：{last_user_text}（距今约 {gap_text}）",
-            f"触发原因：{reason}",
-            f"对方上次内容：{target}",
-            f"你正在和{user_name}进行 QQ 私聊，以下是最近的聊天记录：",
-            dialogue_prompt,
-            (
-                "请明确考虑时间流逝（时段与间隔），结合记忆检索与私聊上下文，"
-                "生成一条合适的主动聊天内容。要求：口语化、简短、单话题，不要太有条理。"
-            ),
-            personality_prompt,
-            chat_prompt_block,
-            keywords_reaction_prompt,
-            reply_style,
-            moderation_prompt,
-        ]
-        prompt = "\n".join(part for part in prompt_parts if part)
-        return prompt, selected_expressions
 
     def _parse_time_to_minutes(self, value: Any) -> Optional[int]:
         if value is None:
@@ -730,139 +402,3 @@ class MaiOnlyYouPlugin(BasePlugin):
             self._increment_daily_count(stream_id)
             self._record_recent_sent(stream_id, content)
             logger.info(f"私聊主动消息发送成功: stream={stream_id}")
-
-    def _get_state_path(self) -> Optional[Path]:
-        if not self.plugin_dir:
-            return None
-        return Path(self.plugin_dir) / "data" / "state.json"
-
-    def _load_state(self) -> None:
-        path = self._get_state_path()
-        if not path or not path.exists():
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-            self._last_user_message_ts = data.get("last_user_message_ts", {}) or {}
-            self._last_proactive_ts = data.get("last_proactive_ts", {}) or {}
-            self._daily_count = data.get("daily_count", {}) or {}
-            self._recent_sent = data.get("recent_sent", {}) or {}
-        except Exception as exc:
-            logger.error(f"加载状态失败: {exc}")
-
-    def _get_state_retention_days(self) -> Optional[int]:
-        value = self.get_config("state.retention_days", 30)
-        try:
-            days = int(value)
-        except (TypeError, ValueError):
-            return 30
-        if days <= 0:
-            return None
-        return days
-
-    def _cleanup_state_by_age(self, now_ts: float) -> None:
-        retention_days = self._get_state_retention_days()
-        if not retention_days:
-            return
-        cutoff_ts = now_ts - (retention_days * 86400)
-        stream_ids = (
-            set(self._last_user_message_ts.keys())
-            | set(self._last_proactive_ts.keys())
-            | set(self._daily_count.keys())
-            | set(self._recent_sent.keys())
-        )
-        for stream_id in list(stream_ids):
-            last_ts = 0.0
-            user_ts = self._last_user_message_ts.get(stream_id)
-            if isinstance(user_ts, (int, float)) and not isinstance(user_ts, bool):
-                last_ts = max(last_ts, float(user_ts))
-            proactive_ts = self._last_proactive_ts.get(stream_id)
-            if isinstance(proactive_ts, (int, float)) and not isinstance(proactive_ts, bool):
-                last_ts = max(last_ts, float(proactive_ts))
-            recent_items = self._recent_sent.get(stream_id, [])
-            if recent_items:
-                recent_ts = max(
-                    (
-                        float(item.get("ts", 0.0))
-                        for item in recent_items
-                        if isinstance(item, dict)
-                    ),
-                    default=0.0,
-                )
-                last_ts = max(last_ts, recent_ts)
-            daily_record = self._daily_count.get(stream_id, {})
-            date_text = daily_record.get("date") if isinstance(daily_record, dict) else None
-            if date_text:
-                try:
-                    date_ts = datetime.strptime(str(date_text), "%Y-%m-%d").timestamp()
-                    last_ts = max(last_ts, date_ts)
-                except ValueError:
-                    pass
-            if last_ts and last_ts < cutoff_ts:
-                self._last_user_message_ts.pop(stream_id, None)
-                self._last_proactive_ts.pop(stream_id, None)
-                self._daily_count.pop(stream_id, None)
-                self._recent_sent.pop(stream_id, None)
-                continue
-            if recent_items:
-                kept_items = [
-                    item
-                    for item in recent_items
-                    if isinstance(item, dict) and item.get("ts", 0.0) >= cutoff_ts
-                ]
-                if kept_items:
-                    self._recent_sent[stream_id] = kept_items
-                else:
-                    self._recent_sent.pop(stream_id, None)
-
-    def _build_state_snapshot(self) -> Dict[str, Any]:
-        return {
-            "last_user_message_ts": dict(self._last_user_message_ts),
-            "last_proactive_ts": dict(self._last_proactive_ts),
-            "daily_count": copy.deepcopy(self._daily_count),
-            "recent_sent": copy.deepcopy(self._recent_sent),
-        }
-
-    def _write_state_file(self, data: Dict[str, Any]) -> None:
-        path = self._get_state_path()
-        if not path:
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = path.with_suffix(".tmp")
-            tmp_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            tmp_path.replace(path)
-        except Exception as exc:
-            logger.error(f"保存状态失败: {exc}")
-            try:
-                if "tmp_path" in locals() and tmp_path.exists():
-                    tmp_path.unlink()
-            except Exception as cleanup_exc:
-                logger.warning(f"清理临时状态文件失败: {cleanup_exc}")
-
-    async def _flush_state_async(self) -> None:
-        try:
-            async with self._state_save_lock:
-                while self._state_dirty:
-                    self._state_dirty = False
-                    data = self._build_state_snapshot()
-                    await asyncio.to_thread(self._write_state_file, data)
-        except Exception as exc:
-            logger.error(f"异步保存状态失败: {exc}")
-        finally:
-            self._state_save_task = None
-
-    def _save_state(self) -> None:
-        self._cleanup_state_by_age(time.time())
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._write_state_file(self._build_state_snapshot())
-            return
-        self._state_dirty = True
-        if self._state_save_task and not self._state_save_task.done():
-            return
-        self._state_save_task = loop.create_task(self._flush_state_async())
