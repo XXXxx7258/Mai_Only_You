@@ -178,11 +178,11 @@ class MaiOnlyYouTestCommand(BaseCommand):
             plugin_instance = plugin_manager.get_plugin_instance("mai_only_you")
             if not plugin_instance:
                 await self.send_text("❌ 无法获取 Mai_Only_You 插件实例")
-                return False, "插件实例获取失败", True
+                return False, "插件实例获取失败", 1
 
             if not self.get_config("plugin.enabled", False):
                 await self.send_text("❌ 插件未启用")
-                return False, "插件未启用", True
+                return False, "插件未启用", 1
 
             user_id = (self.matched_groups.get("user_id") or "").strip()
             stream_id = None
@@ -191,31 +191,31 @@ class MaiOnlyYouTestCommand(BaseCommand):
                 stream = chat_api.get_stream_by_user_id(user_id)
                 if not stream:
                     await self.send_text("❌ 未找到指定用户的私聊")
-                    return False, "未找到私聊", True
+                    return False, "未找到私聊", 1
                 if stream.platform != "qq":
                     await self.send_text("❌ 仅支持 QQ 私聊")
-                    return False, "非 QQ 私聊", True
+                    return False, "非 QQ 私聊", 1
                 stream_id = stream.stream_id
                 target_user_id = str(stream.user_info.user_id or user_id)
             else:
                 chat_stream = self.message.chat_stream
                 if not chat_stream or chat_stream.group_info:
                     await self.send_text("❌ 请在私聊中使用或指定 user_id")
-                    return False, "非私聊", True
+                    return False, "非私聊", 1
                 if chat_stream.platform != "qq":
                     await self.send_text("❌ 仅支持 QQ 私聊")
-                    return False, "非 QQ 私聊", True
+                    return False, "非 QQ 私聊", 1
                 stream_id = chat_stream.stream_id
                 target_user_id = str(chat_stream.user_info.user_id or "")
 
             if target_user_id and not plugin_instance._is_user_allowed(target_user_id):
                 await self.send_text("❌ 目标用户被名单过滤")
-                return False, "用户被过滤", True
+                return False, "用户被过滤", 1
 
             await plugin_instance._handle_silence_trigger(stream_id, target_user_id, reason="调试命令")
-            return True, "调试触发完成", True
+            return True, "调试触发完成", 1
 
         except Exception as exc:
             logger.error(f"调试触发失败: {exc}")
             await self.send_text("❌ 调试触发失败")
-            return False, "调试触发失败", True
+            return False, "调试触发失败", 1
