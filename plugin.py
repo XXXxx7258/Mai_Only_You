@@ -131,7 +131,7 @@ class MaiOnlyYouPlugin(MaiOnlyYouStateMixin, MaiOnlyYouPromptMixin, BasePlugin):
         self._last_schedule_ts: float = 0.0
         self._state_dirty: bool = False
         self._state_save_task: Optional[asyncio.Task] = None
-        self._state_save_lock: asyncio.Lock = asyncio.Lock()
+        self._state_save_lock: Optional[asyncio.Lock] = None
         self._load_state()
 
     def get_plugin_components(self) -> List[Tuple[Any, Type]]:
