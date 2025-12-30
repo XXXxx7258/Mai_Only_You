@@ -187,28 +187,24 @@ class MaiOnlyYouTestCommand(BaseCommand):
                 return False, "插件未启用", 1
 
             user_id = (self.matched_groups.get("user_id") or "").strip()
-            stream_id = None
-            target_user_id = ""
             if user_id:
                 stream = chat_api.get_stream_by_user_id(user_id)
                 if not stream:
                     await self.send_text("❌ 未找到指定用户的私聊")
                     return False, "未找到私聊", 1
-                if stream.platform != "qq":
-                    await self.send_text("❌ 仅支持 QQ 私聊")
-                    return False, "非 QQ 私聊", 1
-                stream_id = stream.stream_id
-                target_user_id = str(stream.user_info.user_id or user_id)
             else:
-                chat_stream = self.message.chat_stream
-                if not chat_stream or chat_stream.group_info:
+                stream = self.message.chat_stream
+                if not stream or stream.group_info:
                     await self.send_text("❌ 请在私聊中使用或指定 user_id")
                     return False, "非私聊", 1
-                if chat_stream.platform != "qq":
-                    await self.send_text("❌ 仅支持 QQ 私聊")
-                    return False, "非 QQ 私聊", 1
-                stream_id = chat_stream.stream_id
-                target_user_id = str(chat_stream.user_info.user_id or "")
+
+            if stream.platform != "qq":
+                await self.send_text("❌ 仅支持 QQ 私聊")
+                return False, "非 QQ 私聊", 1
+
+            stream_id = stream.stream_id
+            fallback_user_id = user_id if user_id else ""
+            target_user_id = str(stream.user_info.user_id or fallback_user_id)
 
             if target_user_id and not plugin_instance._is_user_allowed(target_user_id):
                 await self.send_text("❌ 目标用户被名单过滤")
