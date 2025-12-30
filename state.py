@@ -96,7 +96,7 @@ class MaiOnlyYouStateMixin:
                     last_ts = max(last_ts, date_ts)
                 except ValueError:
                     pass
-            if last_ts and last_ts < cutoff_ts:
+            if last_ts < cutoff_ts:
                 self._last_user_message_ts.pop(stream_id, None)
                 self._last_proactive_ts.pop(stream_id, None)
                 self._daily_count.pop(stream_id, None)
