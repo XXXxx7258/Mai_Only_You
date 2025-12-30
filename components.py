@@ -114,7 +114,8 @@ class PrivateChatSilenceEventHandler(BaseEventHandler):
 
             self.plugin_instance = plugin_manager.get_plugin_instance("mai_only_you")
             if not self.plugin_instance:
-                return True, True, None, None, None
+                logger.error("无法获取 Mai_Only_You 插件实例")
+                return False, True, None, None, None
 
             if not self.get_config("plugin.enabled", False):
                 return True, True, None, None, None
@@ -155,7 +156,8 @@ class PrivateChatStopEventHandler(BaseEventHandler):
 
             self.plugin_instance = plugin_manager.get_plugin_instance("mai_only_you")
             if not self.plugin_instance:
-                return True, True, None, None, None
+                logger.error("无法获取 Mai_Only_You 插件实例")
+                return False, True, None, None, None
 
             await self.plugin_instance._flush_state_on_shutdown()
             return True, True, None, None, None
