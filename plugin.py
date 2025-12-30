@@ -4,6 +4,8 @@ Mai_Only_You plugin (QQ private proactive chat).
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import time
 import json
 import random
@@ -224,11 +226,12 @@ class MaiOnlyYouPlugin(BasePlugin):
         "limits": "频率与未回复策略",
         "context": "上下文配置",
         "memory": "记忆检索配置",
+        "state": "状态持久化配置",
     }
 
     config_schema: dict = {
         "plugin": {
-            "config_version": ConfigField(type=str, default="0.2.4", description="配置文件版本"),
+            "config_version": ConfigField(type=str, default="0.2.5", description="配置文件版本"),
             "enabled": ConfigField(type=bool, default=False, description="是否启用插件"),
         },
         "filtering": {
@@ -287,6 +290,14 @@ class MaiOnlyYouPlugin(BasePlugin):
                 placeholder="和{user_name}最近聊过什么？",
             ),
         },
+        "state": {
+            "retention_days": ConfigField(
+                type=int,
+                default=30,
+                description="状态保留天数（按时间清理）",
+                example="30",
+            ),
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -296,6 +307,9 @@ class MaiOnlyYouPlugin(BasePlugin):
         self._daily_count: Dict[str, Dict[str, Any]] = {}
         self._recent_sent: Dict[str, List[Dict[str, Any]]] = {}
         self._last_schedule_ts: float = 0.0
+        self._state_dirty: bool = False
+        self._state_save_task: Optional[asyncio.Task] = None
+        self._state_save_lock: asyncio.Lock = asyncio.Lock()
         self._load_state()
 
     def get_plugin_components(self) -> List[Tuple[Any, Type]]:
@@ -736,19 +750,119 @@ class MaiOnlyYouPlugin(BasePlugin):
         except Exception as exc:
             logger.error(f"加载状态失败: {exc}")
 
-    def _save_state(self) -> None:
+    def _get_state_retention_days(self) -> Optional[int]:
+        value = self.get_config("state.retention_days", 30)
+        try:
+            days = int(value)
+        except (TypeError, ValueError):
+            return 30
+        if days <= 0:
+            return None
+        return days
+
+    def _cleanup_state_by_age(self, now_ts: float) -> None:
+        retention_days = self._get_state_retention_days()
+        if not retention_days:
+            return
+        cutoff_ts = now_ts - (retention_days * 86400)
+        stream_ids = (
+            set(self._last_user_message_ts.keys())
+            | set(self._last_proactive_ts.keys())
+            | set(self._daily_count.keys())
+            | set(self._recent_sent.keys())
+        )
+        for stream_id in list(stream_ids):
+            last_ts = 0.0
+            user_ts = self._last_user_message_ts.get(stream_id)
+            if isinstance(user_ts, (int, float)) and not isinstance(user_ts, bool):
+                last_ts = max(last_ts, float(user_ts))
+            proactive_ts = self._last_proactive_ts.get(stream_id)
+            if isinstance(proactive_ts, (int, float)) and not isinstance(proactive_ts, bool):
+                last_ts = max(last_ts, float(proactive_ts))
+            recent_items = self._recent_sent.get(stream_id, [])
+            if recent_items:
+                recent_ts = max(
+                    (
+                        float(item.get("ts", 0.0))
+                        for item in recent_items
+                        if isinstance(item, dict)
+                    ),
+                    default=0.0,
+                )
+                last_ts = max(last_ts, recent_ts)
+            daily_record = self._daily_count.get(stream_id, {})
+            date_text = daily_record.get("date") if isinstance(daily_record, dict) else None
+            if date_text:
+                try:
+                    date_ts = datetime.strptime(str(date_text), "%Y-%m-%d").timestamp()
+                    last_ts = max(last_ts, date_ts)
+                except ValueError:
+                    pass
+            if last_ts and last_ts < cutoff_ts:
+                self._last_user_message_ts.pop(stream_id, None)
+                self._last_proactive_ts.pop(stream_id, None)
+                self._daily_count.pop(stream_id, None)
+                self._recent_sent.pop(stream_id, None)
+                continue
+            if recent_items:
+                kept_items = [
+                    item
+                    for item in recent_items
+                    if isinstance(item, dict) and item.get("ts", 0.0) >= cutoff_ts
+                ]
+                if kept_items:
+                    self._recent_sent[stream_id] = kept_items
+                else:
+                    self._recent_sent.pop(stream_id, None)
+
+    def _build_state_snapshot(self) -> Dict[str, Any]:
+        return {
+            "last_user_message_ts": dict(self._last_user_message_ts),
+            "last_proactive_ts": dict(self._last_proactive_ts),
+            "daily_count": copy.deepcopy(self._daily_count),
+            "recent_sent": copy.deepcopy(self._recent_sent),
+        }
+
+    def _write_state_file(self, data: Dict[str, Any]) -> None:
         path = self._get_state_path()
         if not path:
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            data = {
-                "last_user_message_ts": self._last_user_message_ts,
-                "last_proactive_ts": self._last_proactive_ts,
-                "daily_count": self._daily_count,
-                "recent_sent": self._recent_sent,
-            }
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
         except Exception as exc:
             logger.error(f"保存状态失败: {exc}")
+            try:
+                if "tmp_path" in locals() and tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception as cleanup_exc:
+                logger.warning(f"清理临时状态文件失败: {cleanup_exc}")
+
+    async def _flush_state_async(self) -> None:
+        try:
+            async with self._state_save_lock:
+                while self._state_dirty:
+                    self._state_dirty = False
+                    data = self._build_state_snapshot()
+                    await asyncio.to_thread(self._write_state_file, data)
+        except Exception as exc:
+            logger.error(f"异步保存状态失败: {exc}")
+        finally:
+            self._state_save_task = None
+
+    def _save_state(self) -> None:
+        self._cleanup_state_by_age(time.time())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._write_state_file(self._build_state_snapshot())
+            return
+        self._state_dirty = True
+        if self._state_save_task and not self._state_save_task.done():
+            return
+        self._state_save_task = loop.create_task(self._flush_state_async())
