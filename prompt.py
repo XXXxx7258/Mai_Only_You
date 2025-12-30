@@ -19,6 +19,7 @@ from src.plugin_system import get_logger
 from src.plugin_system.apis import message_api
 
 logger = get_logger("mai_only_you")
+SHORT_CONTEXT_RATIO = 0.33
 
 
 class MaiOnlyYouPromptMixin:
@@ -89,7 +90,7 @@ class MaiOnlyYouPromptMixin:
             long_time_notice=True,
         )
 
-        short_limit = max(1, int(context_size * 0.33))
+        short_limit = max(1, int(context_size * SHORT_CONTEXT_RATIO))
         message_list_short = message_api.get_messages_before_time_in_chat(
             chat_id=stream_id,
             timestamp=now_ts,
