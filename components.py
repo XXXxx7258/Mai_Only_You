@@ -204,7 +204,8 @@ class MaiOnlyYouTestCommand(BaseCommand):
 
             stream_id = stream.stream_id
             fallback_user_id = user_id if user_id else ""
-            target_user_id = str(stream.user_info.user_id or fallback_user_id)
+            user_info = getattr(stream, "user_info", None)
+            target_user_id = str(getattr(user_info, "user_id", None) or fallback_user_id)
 
             if target_user_id and not plugin_instance._is_user_allowed(target_user_id):
                 await self.send_text("❌ 目标用户被名单过滤")
