@@ -94,8 +94,10 @@ class MaiOnlyYouStateMixin:
                 try:
                     date_ts = datetime.strptime(str(date_text), "%Y-%m-%d").timestamp()
                     last_ts = max(last_ts, date_ts)
-                except ValueError:
-                    pass
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        f"无法解析状态中的日期 '{date_text}' (stream_id: {stream_id}): {exc}"
+                    )
             if last_ts < cutoff_ts:
                 self._last_user_message_ts.pop(stream_id, None)
                 self._last_proactive_ts.pop(stream_id, None)
@@ -146,9 +148,12 @@ class MaiOnlyYouStateMixin:
 
     async def _flush_state_async(self) -> None:
         try:
+            if self._state_save_lock is None:
+                self._state_save_lock = asyncio.Lock()
             async with self._state_save_lock:
                 while self._state_dirty:
                     self._state_dirty = False
+                    self._cleanup_state_by_age(time.time())
                     data = self._build_state_snapshot()
                     await asyncio.to_thread(self._write_state_file, data)
         except Exception as exc:
@@ -167,10 +172,10 @@ class MaiOnlyYouStateMixin:
             await self._flush_state_async()
 
     def _save_state(self) -> None:
-        self._cleanup_state_by_age(time.time())
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            self._cleanup_state_by_age(time.time())
             self._write_state_file(self._build_state_snapshot())
             return
         self._state_dirty = True
