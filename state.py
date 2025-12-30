@@ -71,12 +71,12 @@ class MaiOnlyYouStateMixin:
         )
         for stream_id in list(stream_ids):
             last_ts = 0.0
-            user_ts = self._last_user_message_ts.get(stream_id)
-            if isinstance(user_ts, (int, float)) and not isinstance(user_ts, bool):
-                last_ts = max(last_ts, float(user_ts))
-            proactive_ts = self._last_proactive_ts.get(stream_id)
-            if isinstance(proactive_ts, (int, float)) and not isinstance(proactive_ts, bool):
-                last_ts = max(last_ts, float(proactive_ts))
+            user_ts = self._coerce_timestamp(self._last_user_message_ts.get(stream_id))
+            if user_ts is not None:
+                last_ts = max(last_ts, user_ts)
+            proactive_ts = self._coerce_timestamp(self._last_proactive_ts.get(stream_id))
+            if proactive_ts is not None:
+                last_ts = max(last_ts, proactive_ts)
             recent_items = self._recent_sent.get(stream_id, [])
             if recent_items:
                 recent_ts_values = []
