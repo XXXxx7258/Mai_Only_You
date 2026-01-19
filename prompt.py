@@ -115,7 +115,7 @@ class MaiOnlyYouPromptMixin:
                     memory_question = rendered
             memory_context = dialogue_prompt_short
             if memory_question:
-                memory_context = f"{dialogue_prompt_short}\n\n[记忆检索问题]\n{memory_question}\n"
+                memory_context += f"\n\n[记忆检索问题]\n{memory_question}\n"
             memory_prompt = await build_memory_retrieval_prompt(
                 memory_context,
                 sender=user_name,
