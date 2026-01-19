@@ -113,13 +113,15 @@ class MaiOnlyYouPromptMixin:
                 rendered = self._render_question_template(template, user_name, user_id).strip()
                 if rendered:
                     memory_question = rendered
+            memory_context = dialogue_prompt_short
+            if memory_question:
+                memory_context = f"{dialogue_prompt_short}\n\n[记忆检索问题]\n{memory_question}\n"
             memory_prompt = await build_memory_retrieval_prompt(
-                dialogue_prompt_short,
+                memory_context,
                 sender=user_name,
                 target=target,
                 chat_stream=chat_stream,
                 think_level=1,
-                question=memory_question,
             )
 
         expression_habits, selected_expressions = await replyer.build_expression_habits(
